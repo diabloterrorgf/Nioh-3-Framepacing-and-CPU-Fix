@@ -5,7 +5,8 @@ micro-stutter and its abnormally high CPU usage, without changing gameplay.
 
 - **Smooth motion at any frame rate**: one game update per rendered frame, sized to the real time that
   passed (variable timestep), so 75, 90 or 110 fps all look smooth instead of juddering.
-- **Even pacing fallback**: on slower PCs it switches to a steady 60/40/30 fps that keeps the game at full speed.
+- **Even pacing fallback**: on slower PCs it switches to a steady 60/40/30 fps that keeps the game at full speed,
+  chosen to suit the monitor's refresh rate (for example 30 rather than 40 fps on a 60 Hz screen).
 - **About a third less CPU**: five busy-waiting threads now rest instead of spinning cores at 100%.
 - **No game files changed**: delete the DLL and the game is back to stock.
 - **Fails safe**: if a game update changes the code it looks for, the affected part switches itself off.
@@ -45,7 +46,8 @@ without it, and load times stayed at 14–16 s with the CPU fixes on.
 1. Download `Nioh3Fix.zip` from [Releases](../../releases).
 2. Extract it into the Nioh 3 folder, the one containing `Nioh3.exe`. In Steam, right-click Nioh 3 and
    choose **Manage → Browse local files**.
-3. In the game, set **Frame Rate Cap** to **120 (fixed)** for the best result.
+3. In the game, set **Frame Rate Cap** as shown in [Recommended setup](#recommended-setup). For most PCs
+   that's **120 (fixed)**.
 
 That's all. A `nioh3fix.log` file appears next to the game showing what the fix found and is doing. If
 the game folder isn't writable, it goes to `%LOCALAPPDATA%\Nioh3Fix` instead.
@@ -53,6 +55,31 @@ the game folder isn't writable, it goes to `%LOCALAPPDATA%\Nioh3Fix` instead.
 **Uninstall:** delete `dinput8.dll` and the `nioh3fix*` / `Nioh3Fix_*` files.
 
 **In game:** press **F10** to switch the variable timestep on and off and compare.
+
+## Recommended setup
+
+Pick the in-game **Frame Rate Cap** to match your monitor and the frame rate your PC usually reaches:
+
+| Your monitor | Your PC's frame rate | In-game Frame Rate Cap | `nioh3fix.ini` | Result |
+|---|---|---|---|---|
+| 120 Hz or faster | 60–120+ fps | 120 (fixed) | defaults | Smooth at whatever fps you get (75, 90, 110…) |
+| 120 Hz or faster | ~40–60 fps | 120 (fixed) | defaults | Steady 40 fps at full game speed ¹ |
+| 60 Hz, no G-Sync/FreeSync | holds 60 fps | 60 (fixed) | defaults | The game's own steady 60 fps, less CPU use |
+| 60 Hz, no G-Sync/FreeSync | below 60 fps | 120 (fixed) | defaults | Steady 30 fps at full game speed (or lower graphics settings to hold 60) |
+| G-Sync / FreeSync (VRR) on | any | 120 (fixed) | `PacerFitDisplay=0` | Smooth 60–120 fps; steady 40 or 30 below that |
+| any | below 40 fps | 120 (fixed) | defaults | Steady 30 fps at full game speed |
+
+¹ On 144/165 Hz monitors without VRR, 40 fps can't be shown perfectly evenly because a frame lasts 3.6 or
+4.1 refreshes. Running the monitor at 120 Hz for this game fixes that.
+
+Why: at **120 (fixed)** the game moves in 120 small steps per second, and Nioh3Fix can make any frame rate
+from 60 to 120 smooth. At **60 (fixed)** the game moves in 60 steps per second and paces itself evenly,
+as long as the PC holds 60 fps; Nioh3Fix then only reduces CPU usage. A 60 Hz monitor can't show more than
+60 fps, so "120 (fixed)" adds nothing there when the PC holds 60.
+
+Below 60 fps, variable timestep isn't used: one frame would have to cover a bigger time step than the game
+ever takes on its own (1/60 s), which the game wasn't built for. Even pacing at 40 or 30 fps keeps the game
+at full speed instead.
 
 ## Settings
 
@@ -65,6 +92,7 @@ and changes apply within 2 seconds. The defaults are meant for every PC.
 | `VfrMinFps` | 58 | Below this fps (for 2 s), use even 40/30 fps pacing instead; switches back automatically |
 | `VfrAllowOnline` | 0 | Also use variable timestep in co-op/online play (untested, so off) |
 | `Pacer` | 1 | Even pacing when variable timestep isn't active: 1 = auto, 0 = off, or 60/40/30 |
+| `PacerFitDisplay` | 1 | Auto pacing only uses rates the monitor shows evenly (60 Hz: 60/30; 120/240 Hz: all). Set 0 for 60 Hz VRR monitors |
 | `PumpFix` | 1 | Window thread waits for messages instead of polling non-stop |
 | `GatePollUs` | 100 | Render thread naps 0.1 ms between work checks instead of 1 ms busy loops |
 | `UpdateNap` | 1 | Game-logic thread naps until 1 ms before its next update is due |
@@ -91,7 +119,8 @@ and changes apply within 2 seconds. The defaults are meant for every PC.
 |---|---|---|
 | Proxy | `src/dllmain.cpp` | Forwards the real `dinput8.dll` exports from the System32 folder; installs everything else from background threads |
 | Variable timestep | `src/vfr/` | The nioh3fps core. A render "heartbeat" at the packet take gates the update thread so exactly one update runs per rendered frame. That update's step is scaled by measured real time. The game systems that assume 120 updates/s (character movement steps, frame-based timers, input-hold timers, turning speed) receive a matching rate. It disarms automatically in menus, cutscenes, loading, pause and online sessions. |
-| Pacer / hybrid | `src/pacer.cpp` | At the render thread's once-per-frame clock read, holds the frame until the next slot of an even 120/60/40/30 fps schedule, phase-locked to the display's vblank and clear of update boundaries. It also decides between variable timestep and even pacing from the measured fps and GPU/CPU headroom. |
+| Pacer / hybrid | `src/pacer.cpp` | At the render thread's once-per-frame clock read, holds the frame until the next slot of an even 120/60/40/30 fps schedule, phase-locked to the display's vblank and clear of update boundaries. Auto mode prefers rates that last a
+whole number of refreshes of the monitor the game is on. It also decides between variable timestep and even pacing from the measured fps and GPU/CPU headroom. |
 | CPU fixes | `src/dllmain.cpp` | Hooks `Sleep`, `QueryPerformanceCounter`, `PeekMessageA` and one queue-check leaf function. A wait is changed only when its caller matches the exact game code signature. Waits nap in 0.1 ms slices on high-resolution timers and never past the moment the game would have continued. |
 
 Every change was A/B tested for game speed (update counter at exactly 120/s, stamina regeneration,

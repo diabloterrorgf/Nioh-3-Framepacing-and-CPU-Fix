@@ -5,7 +5,8 @@
 // read until the next slot of an absolute timeline at a rate that divides 120 (120/60/40/30): every
 // frame then advances the same number of ticks. Game logic and game speed are unchanged.
 //
-// Auto mode picks the fastest such rate the PC can hold. Pacing hides how long frames really take, so
+// Auto mode picks the fastest such rate the PC can hold and, when it can, one that also lasts a whole
+// number of display refreshes, so frames are shown evenly too. Pacing hides how long frames really take, so
 // GPU load comes from the kernel's per-process GPU running time (what Task Manager shows) and CPU load
 // from how long the Game thread needs between its release and its next frame start.
 #define NOMINMAX
@@ -15,14 +16,16 @@
 #include <dwmapi.h>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <algorithm>
 #include <atomic>
 #include "nioh3fix.h"
+#include "pacer_rates.h"
 
-// Rates must divide the game's tick rate. Only the "120 (fixed)" cap is paced: at 60 every frame is
-// already one tick and the game's own limiter releases frames on its 60 Hz schedule.
-static const int kRates[] = { 120, 60, 40, 30 };
+// Only the "120 (fixed)" cap is paced: at 60 every frame is already one tick and the game's own
+// limiter releases frames on its 60 Hz schedule.
 static int g_rateIdx = 1;                 // auto mode starts at 60 and climbs if there is headroom
+static std::atomic<int> g_displayHz{ 0 }; // refresh rate of the monitor showing the game (0 = unknown)
 static HANDLE g_timer;
 
 // The game's tick rate: its fps mode as read at each update (0 = not known yet).
@@ -59,13 +62,46 @@ static int64_t EngineRunningTime(const Engine& e) {
     return D3DKMTQueryStatistics(&qs) == 0 ? qs.QueryResult.ProcessNodeInformation.RunningTime.QuadPart : 0;
 }
 
-static DWORD WINAPI GpuUtilThread(void*) {
+// ---------------------------------------------------------------- display refresh rate
+// The current mode of the monitor the game window is on (exclusive fullscreen included).
+static BOOL CALLBACK LargestGameWindow(HWND w, LPARAM out) {
+    DWORD pid = 0; GetWindowThreadProcessId(w, &pid);
+    RECT r;
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(w) || GetWindow(w, GW_OWNER) || !GetWindowRect(w, &r)) return TRUE;
+    auto best = (std::pair<HWND, int64_t>*)out;
+    int64_t area = (int64_t)(r.right - r.left) * (r.bottom - r.top);
+    if (area > best->second) *best = { w, area };
+    return TRUE;
+}
+static int DetectDisplayHz() {
+    std::pair<HWND, int64_t> best{ nullptr, 0 };
+    EnumWindows(LargestGameWindow, (LPARAM)&best);
+    if (!best.first) return 0;
+    MONITORINFOEXW mi = {}; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(MonitorFromWindow(best.first, MONITOR_DEFAULTTONEAREST), &mi)) return 0;
+    DEVMODEW dm = {}; dm.dmSize = sizeof(dm);
+    if (!EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm)) return 0;
+    return dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 0;   // 0/1 = "hardware default"
+}
+static void UpdateDisplayHz() {
+    int hz = g_cfg.pacerDisplayHz > 0 ? g_cfg.pacerDisplayHz : DetectDisplayHz();
+    if (!hz || hz == g_displayHz) return;
+    g_displayHz = hz;
+    char fits[64] = ""; int n = 0;
+    for (int i = 0; i < kNumRates; i++)
+        if (RateAllowed(i, hz, g_cfg.pacerFitDisplay != 0)) n += sprintf_s(fits + n, sizeof(fits) - n, "%s%d", n ? "/" : "", kRates[i]);
+    Log("pacer: display %d Hz%s, auto rates %s", hz, g_cfg.pacerDisplayHz > 0 ? " (PacerDisplayHz)" : "", fits);
+}
+
+// Samples GPU load every 250 ms and the display refresh rate every 2 s.
+static DWORD WINAPI MonitorThread(void*) {
     FindEngines();
     Log("pacer: %d GPU engines on all adapters", g_nEng);
-    if (!g_nEng) return 0;
     const int kWin = 4;                      // 4 x 250 ms window
     static int64_t run[kWin][64], wall[kWin];
     for (int i = 0;; i++, Sleep(250)) {
+        if (i % 8 == 0) UpdateDisplayHz();
+        if (!g_nEng) continue;
         int s = i % kWin;
         wall[s] = Qpc();
         for (int e = 0; e < g_nEng; e++) run[s][e] = EngineRunningTime(g_eng[e]);
@@ -103,8 +139,18 @@ static void WaitUntil(int64_t t) {
 static int g_upVotes, g_downVotes;
 static int64_t g_lastEval, g_lastUpshift, g_upBanUntil, g_upBackoffSec = 30;
 static void ChooseRate(int64_t now) {
+    int hz = g_displayHz; bool fit = g_cfg.pacerFitDisplay != 0;
+    if (!RateAllowed(g_rateIdx, hz, fit)) {   // display changed: move to a rate that fits it
+        int to = SlowerRate(g_rateIdx, hz, fit);
+        if (to < 0) to = FasterRate(g_rateIdx, hz, fit);
+        Log("pacer: %d -> %d fps (fits the %d Hz display)", kRates[g_rateIdx], kRates[to], hz);
+        g_rateIdx = to; g_cpuN = 0; g_lateSum = 0; g_upVotes = g_downVotes = 0; g_deadline = 0;
+        for (int& l : g_late) l = 0;
+        return;
+    }
     if (now - g_lastEval < g_qpf.QuadPart || g_cpuN < 60) return;
     g_lastEval = now;
+    int faster = FasterRate(g_rateIdx, hz, fit), slower = SlowerRate(g_rateIdx, hz, fit);
     double period = 1000.0 / kRates[g_rateIdx];
     float util = g_gpuUtil;
     float gpu = util < 0 ? 0.f : (float)(util * period);   // GPU ms per frame at the current rate
@@ -114,17 +160,17 @@ static void ChooseRate(int64_t now) {
     // only real missed slots count against the current rate: under back-pressure the CPU estimate
     // approaches the period without any frame actually being late
     g_downVotes = g_lateSum > 120 / 5 ? g_downVotes + 1 : 0;
-    g_upVotes = g_rateIdx > 0 && util >= 0 && g_lateSum == 0 && now > g_upBanUntil &&
-                need < 1000.0 / kRates[g_rateIdx - 1] * 0.75 ? g_upVotes + 1 : 0;
+    g_upVotes = faster >= 0 && util >= 0 && g_lateSum == 0 && now > g_upBanUntil &&
+                need < 1000.0 / kRates[faster] * 0.75 ? g_upVotes + 1 : 0;
     int next = g_rateIdx;
-    if ((overload || g_downVotes >= 3) && g_rateIdx < 3) {
-        next = g_rateIdx + 1;
+    if ((overload || g_downVotes >= 3) && slower >= 0) {
+        next = slower;
         if (g_lastUpshift && now - g_lastUpshift < g_qpf.QuadPart * 30) {     // the last climb failed
             g_upBanUntil = now + g_qpf.QuadPart * g_upBackoffSec;
             g_upBackoffSec = std::min<int64_t>(g_upBackoffSec * 2, 600);
         }
     } else if (g_upVotes >= 5) {
-        next = g_rateIdx - 1; g_lastUpshift = now;
+        next = faster; g_lastUpshift = now;
     }
     if (next != g_rateIdx) {
         Log("pacer: %d -> %d fps (late %d/120, gpu %.2f ms/frame, p90 cpu %.2f ms)", kRates[g_rateIdx], kRates[next], g_lateSum, gpu, cpu);
@@ -165,8 +211,8 @@ static bool Hybrid(int64_t now) {
             g_hyLowSecs = armed && g_cfg.pacer && fps < g_cfg.vfrMinFps ? g_hyLowSecs + 1 : 0;
             if (g_hyLowSecs >= 2) {
                 g_divMode = true; g_hyHighSecs = 0;
-                g_rateIdx = 3;                                  // highest divisor rate the PC actually holds
-                for (int i = 0; i < 4; i++) if (kRates[i] <= fps) { g_rateIdx = i; break; }
+                // the fastest rate the PC actually holds (and that fits the display)
+                g_rateIdx = RateForFps(fps, g_displayHz, g_cfg.pacerFitDisplay != 0);
                 g_cpuN = 0; g_deadline = 0;
                 Log("hybrid: %.1f fps < %d -> divisor pacing at %d fps", fps, g_cfg.vfrMinFps, kRates[g_rateIdx]);
             }
@@ -247,5 +293,5 @@ void Pacer_FrameStart() {
 }
 
 void Pacer_Init() {
-    CloseHandle(CreateThread(nullptr, 0, GpuUtilThread, nullptr, 0, nullptr));
+    CloseHandle(CreateThread(nullptr, 0, MonitorThread, nullptr, 0, nullptr));
 }

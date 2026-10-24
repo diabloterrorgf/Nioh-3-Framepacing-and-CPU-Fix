@@ -304,6 +304,8 @@ static void LoadConfig() {
     g_cfg.pacerSpinUs = I(L"PacerSpinUs", g_cfg.pacerSpinUs, 0, 5000);
     g_cfg.pacerVblank = I(L"PacerVblank", g_cfg.pacerVblank, 0, 1);
     g_cfg.pacerPhaseUs = I(L"PacerPhaseUs", g_cfg.pacerPhaseUs, 0, 10000);
+    g_cfg.pacerFitDisplay = I(L"PacerFitDisplay", g_cfg.pacerFitDisplay, 0, 1);
+    g_cfg.pacerDisplayHz = I(L"PacerDisplayHz", g_cfg.pacerDisplayHz, 0, 1000);
     g_cfg.vfr = I(L"VariableTimestep", g_cfg.vfr, 0, 1);
     g_cfg.vfrMinFps = I(L"VfrMinFps", g_cfg.vfrMinFps, 0, 120);
     g_cfg.vfrAllowOnline = I(L"VfrAllowOnline", g_cfg.vfrAllowOnline, 0, 1);

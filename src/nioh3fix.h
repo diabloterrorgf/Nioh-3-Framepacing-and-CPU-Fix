@@ -11,6 +11,8 @@ struct Config {
     int pacerSpinUs = 700;   // Fix E: spin (instead of timer-sleep) for the last part of each wait
     int pacerVblank = 1;     // Fix E: align frame slots to the display's vblank phase
     int pacerPhaseUs = 500;  // Fix E: release frames this long after a vblank
+    int pacerFitDisplay = 1; // Fix E: auto mode prefers rates lasting a whole number of display refreshes
+    int pacerDisplayHz = 0;  // Fix E: display refresh rate to assume (0 = detect)
     int vfr = 1;             // variable timestep (ported nioh3fps core) while fps >= vfrMinFps
     int vfrMinFps = 58;      // below this, switch to divisor pacing (40/30) to keep full game speed
     int vfrAllowOnline = 0;  // keep variable timestep on in online/co-op sessions
